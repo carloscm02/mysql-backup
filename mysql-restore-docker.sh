@@ -1,16 +1,23 @@
 #!/bin/bash
 
-# Cargar variables de entorno desde .env
-if [ -f .env ]; then
+# Determinar qué archivo .env usar
+# Si se pasa un segundo parámetro, usar ese archivo
+# Si no, usar .env por defecto
+ENV_FILE="${2:-.env}"
+
+# Cargar variables de entorno desde el archivo .env especificado
+if [ -f "$ENV_FILE" ]; then
+    echo "📄 Cargando variables desde: $ENV_FILE"
     while IFS= read -r line || [ -n "$line" ]; do
         if [[ "$line" =~ ^[[:space:]]*# ]] || [[ -z "${line// }" ]]; then
             continue
         fi
         export "$line"
-    done < .env
+    done < "$ENV_FILE"
 else
-    echo "❌ Error: No se encontró el archivo .env"
+    echo "❌ Error: No se encontró el archivo $ENV_FILE"
     echo "   Por favor, crea un archivo .env con las variables de conexión"
+    echo "   O especifica un archivo .env como segundo parámetro: $0 [parametro1] archivo.env"
     exit 1
 fi
 
@@ -146,15 +153,16 @@ echo ""
 
 # Crear contenedor
 echo "🔨 Creando contenedor Docker..."
-docker run -d \
+CONTAINER_CREATE_OUTPUT=$(docker run -d \
     --name "$CONTAINER_NAME" \
     -e MYSQL_ROOT_PASSWORD="$DOCKER_ROOT_PASSWORD" \
     -p "$RESTORE_PORT:$DOCKER_CONTAINER_PORT" \
     "$DOCKER_IMAGE" \
-    >/dev/null 2>&1
+    2>&1)
 
 if [ $? -ne 0 ]; then
     echo -e "${RED}❌ Error${NC}: No se pudo crear el contenedor Docker"
+    echo "   Detalles: $CONTAINER_CREATE_OUTPUT"
     echo "   Verifica que Docker esté instalado y funcionando"
     exit 1
 fi
@@ -174,7 +182,12 @@ while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
 done
 
 if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-    echo -e "${RED}❌ Error${NC}: MySQL/MariaDB no se inició correctamente en el contenedor"
+    echo -e "${RED}❌ Error${NC}: MySQL/MariaDB no se inició correctamente en el contenedor después de $MAX_ATTEMPTS intentos"
+    echo ""
+    echo "📄 Últimos logs del contenedor:"
+    docker logs --tail 20 "$CONTAINER_NAME" 2>&1
+    echo ""
+    echo "   Para ver todos los logs: docker logs $CONTAINER_NAME"
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
     exit 1
 fi
@@ -184,14 +197,36 @@ echo ""
 
 # Crear base de datos si no existe
 echo "📋 Creando base de datos si no existe..."
-docker exec "$CONTAINER_NAME" mysql -uroot -p"$DOCKER_ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS \`$RESTORE_DB\`;" 2>/dev/null
+DB_CREATE_OUTPUT=$(docker exec "$CONTAINER_NAME" mysql -uroot -p"$DOCKER_ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS \`$RESTORE_DB\`;" 2>&1)
+if [ $? -ne 0 ]; then
+    echo -e "${RED}❌ Error${NC}: No se pudo crear la base de datos"
+    echo "   Detalles: $DB_CREATE_OUTPUT"
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
+    exit 1
+fi
 
 # Crear usuario para restaurar si no es root
 if [ "$DOCKER_RESTORE_USER" != "root" ]; then
     echo "👤 Creando usuario para restauración..."
-    docker exec "$CONTAINER_NAME" mysql -uroot -p"$DOCKER_ROOT_PASSWORD" -e "CREATE USER IF NOT EXISTS '$DOCKER_RESTORE_USER'@'%' IDENTIFIED BY '$DOCKER_RESTORE_PASS';" 2>/dev/null
-    docker exec "$CONTAINER_NAME" mysql -uroot -p"$DOCKER_ROOT_PASSWORD" -e "GRANT ALL PRIVILEGES ON \`$RESTORE_DB\`.* TO '$DOCKER_RESTORE_USER'@'%';" 2>/dev/null
-    docker exec "$CONTAINER_NAME" mysql -uroot -p"$DOCKER_ROOT_PASSWORD" -e "FLUSH PRIVILEGES;" 2>/dev/null
+    USER_CREATE_OUTPUT=$(docker exec "$CONTAINER_NAME" mysql -uroot -p"$DOCKER_ROOT_PASSWORD" -e "CREATE USER IF NOT EXISTS '$DOCKER_RESTORE_USER'@'%' IDENTIFIED BY '$DOCKER_RESTORE_PASS';" 2>&1)
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}⚠️  Advertencia${NC}: No se pudo crear el usuario (puede que ya exista)"
+        echo "   Detalles: $USER_CREATE_OUTPUT"
+    fi
+    
+    GRANT_OUTPUT=$(docker exec "$CONTAINER_NAME" mysql -uroot -p"$DOCKER_ROOT_PASSWORD" -e "GRANT ALL PRIVILEGES ON \`$RESTORE_DB\`.* TO '$DOCKER_RESTORE_USER'@'%';" 2>&1)
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}❌ Error${NC}: No se pudieron otorgar privilegios al usuario"
+        echo "   Detalles: $GRANT_OUTPUT"
+        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
+        exit 1
+    fi
+    
+    FLUSH_OUTPUT=$(docker exec "$CONTAINER_NAME" mysql -uroot -p"$DOCKER_ROOT_PASSWORD" -e "FLUSH PRIVILEGES;" 2>&1)
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}⚠️  Advertencia${NC}: No se pudieron refrescar los privilegios"
+        echo "   Detalles: $FLUSH_OUTPUT"
+    fi
 fi
 
 echo ""
@@ -199,26 +234,75 @@ echo ""
 # Descomprimir backup temporalmente para restaurar
 TEMP_SQL="/tmp/restore_$(date +%s).sql"
 echo "💾 Descomprimiendo backup..."
-gunzip -c "$SELECTED_BACKUP" > "$TEMP_SQL"
+DECOMPRESS_OUTPUT=$(gunzip -c "$SELECTED_BACKUP" > "$TEMP_SQL" 2>&1)
+DECOMPRESS_EXIT_CODE=$?
 
-if [ $? -ne 0 ]; then
+if [ $DECOMPRESS_EXIT_CODE -ne 0 ]; then
     echo -e "${RED}❌ Error${NC}: No se pudo descomprimir el backup"
+    echo "   Detalles: $DECOMPRESS_OUTPUT"
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
     rm -f "$TEMP_SQL"
     exit 1
 fi
 
+# Verificar que el archivo SQL se creó correctamente
+if [ ! -f "$TEMP_SQL" ]; then
+    echo -e "${RED}❌ Error${NC}: El archivo SQL temporal no se creó"
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
+    exit 1
+fi
+
+SQL_SIZE=$(du -h "$TEMP_SQL" | cut -f1)
+echo "   Archivo SQL descomprimido: $SQL_SIZE"
+echo ""
+
+# Verificar conexión antes de restaurar
+echo "🔍 Verificando conexión con la base de datos antes de restaurar..."
+CONNECTION_TEST=$(docker exec "$CONTAINER_NAME" mysql -u"$DOCKER_RESTORE_USER" -p"$DOCKER_RESTORE_PASS" -e "SELECT 1;" "$RESTORE_DB" 2>&1)
+if [ $? -ne 0 ]; then
+    echo -e "${RED}❌ Error${NC}: No se pudo conectar a la base de datos antes de restaurar"
+    echo "   Detalles: $CONNECTION_TEST"
+    echo "   Usuario: $DOCKER_RESTORE_USER"
+    echo "   Base de datos: $RESTORE_DB"
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
+    rm -f "$TEMP_SQL"
+    exit 1
+fi
+echo "✅ Conexión verificada correctamente"
+echo ""
+
 # Restaurar backup
 echo "💾 Restaurando backup en el contenedor..."
-docker exec -i "$CONTAINER_NAME" mysql -u"$DOCKER_RESTORE_USER" -p"$DOCKER_RESTORE_PASS" "$RESTORE_DB" < "$TEMP_SQL" 2>/dev/null
-
+echo "   Esto puede tardar varios minutos dependiendo del tamaño del backup..."
+RESTORE_OUTPUT=$(docker exec -i "$CONTAINER_NAME" mysql -u"$DOCKER_RESTORE_USER" -p"$DOCKER_RESTORE_PASS" "$RESTORE_DB" < "$TEMP_SQL" 2>&1)
 RESTORE_EXIT_CODE=$?
 
 # Eliminar archivo temporal
 rm -f "$TEMP_SQL"
 
 if [ $RESTORE_EXIT_CODE -ne 0 ]; then
+    echo ""
     echo -e "${RED}❌ Error${NC}: Fallo al restaurar el backup"
+    echo ""
+    echo "📋 Detalles del error:"
+    echo "$RESTORE_OUTPUT" | head -50
+    if [ $(echo "$RESTORE_OUTPUT" | wc -l) -gt 50 ]; then
+        echo "... (mostrando solo las primeras 50 líneas)"
+    fi
+    echo ""
+    echo "🔍 Información de depuración:"
+    echo "   Contenedor: $CONTAINER_NAME"
+    echo "   Usuario: $DOCKER_RESTORE_USER"
+    echo "   Base de datos: $RESTORE_DB"
+    echo "   Archivo backup: $SELECTED_BACKUP"
+    echo "   Tamaño SQL descomprimido: $SQL_SIZE"
+    echo ""
+    echo "📄 Para ver los logs del contenedor:"
+    echo "   docker logs $CONTAINER_NAME"
+    echo ""
+    echo "🔌 Para conectarte y revisar manualmente:"
+    echo "   docker exec -it $CONTAINER_NAME mysql -u$DOCKER_RESTORE_USER -p$DOCKER_RESTORE_PASS $RESTORE_DB"
+    echo ""
     echo "   El contenedor se mantendrá activo para revisión"
     exit 1
 fi

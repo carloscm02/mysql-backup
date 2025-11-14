@@ -132,6 +132,14 @@ DOCKER_CONTAINER_NAME=mysql-restore-container
 ./mysql-backup.sh
 ```
 
+O especifica un archivo `.env` personalizado como segundo parámetro:
+
+```bash
+./mysql-backup.sh [parametro1] .bbdd_empresa1.env
+```
+
+**Nota**: Si no se especifica un segundo parámetro, el script usará el archivo `.env` por defecto.
+
 El script:
 1. Verifica la conexión a la base de datos
 2. Muestra información de la base de datos
@@ -149,6 +157,14 @@ backups/[DB_NAME]_backup_[YYYY_MM_DD_HHMMSS].sql.gz
 ```bash
 ./mysql-restore-docker.sh
 ```
+
+O especifica un archivo `.env` personalizado como segundo parámetro:
+
+```bash
+./mysql-restore-docker.sh [parametro1] .bbdd_empresa1.env
+```
+
+**Nota**: Si no se especifica un segundo parámetro, el script usará el archivo `.env` por defecto.
 
 El script:
 1. Muestra los backups disponibles
@@ -249,7 +265,7 @@ Selecciona el número del backup a restaurar: 1
 
 ### Error: "No se encontró el archivo .env"
 
-Asegúrate de que el archivo `.env` existe en el directorio `mysql-backup/` y contiene todas las variables requeridas.
+Asegúrate de que el archivo `.env` (o el archivo especificado como segundo parámetro) existe en el directorio `mysql-backup/` y contiene todas las variables requeridas.
 
 ### Error: "No se pudo conectar a la base de datos"
 

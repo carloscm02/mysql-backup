@@ -1,16 +1,23 @@
 #!/bin/bash
 
-# Cargar variables de entorno desde .env
-if [ -f .env ]; then
+# Determinar qué archivo .env usar
+# Si se pasa un segundo parámetro, usar ese archivo
+# Si no, usar .env por defecto
+ENV_FILE="${2:-.env}"
+
+# Cargar variables de entorno desde el archivo .env especificado
+if [ -f "$ENV_FILE" ]; then
+    echo "📄 Cargando variables desde: $ENV_FILE"
     while IFS= read -r line || [ -n "$line" ]; do
         if [[ "$line" =~ ^[[:space:]]*# ]] || [[ -z "${line// }" ]]; then
             continue
         fi
         export "$line"
-    done < .env
+    done < "$ENV_FILE"
 else
-    echo "❌ Error: No se encontró el archivo .env"
+    echo "❌ Error: No se encontró el archivo $ENV_FILE"
     echo "   Por favor, crea un archivo .env con las variables de conexión a la base de datos"
+    echo "   O especifica un archivo .env como segundo parámetro: $0 [parametro1] archivo.env"
     exit 1
 fi
 
@@ -20,6 +27,9 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
+
+# Variables requeridas
+REQUIRED_VARS=(DB_HOST DB_PORT DB_USER DB_PASS DB_NAME)
 
 # Validar variables requeridas
 missing_vars=()
