@@ -136,6 +136,16 @@ echo "   Fecha: $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
 echo -e "${GREEN}✅ Copia de seguridad completada exitosamente${NC}"
 echo ""
+
+# Calcular y mostrar el tamaño total de todas las copias de seguridad
+TOTAL_BACKUP_SIZE=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
+if [ -n "$TOTAL_BACKUP_SIZE" ]; then
+    echo -e "📦 ${BLUE}Tamaño total de todas las copias de seguridad: ${YELLOW}$TOTAL_BACKUP_SIZE${NC}"
+else
+    echo -e "📦 ${BLUE}Tamaño total de todas las copias de seguridad: ${YELLOW}No disponible${NC}"
+fi
+echo ""
+
 echo "🧹 COMANDOS PARA RECUPERAR ESPACIO EN DISCO:"
 echo ""
 echo "   📦 Eliminar backups anteriores a 20 días:"
