@@ -188,9 +188,76 @@ echo "🚀 Iniciando restauración en nuevo contenedor Docker..."
 echo -e "📁 Backup seleccionado: ${YELLOW}$(basename "$SELECTED_BACKUP")${NC}"
 echo ""
 
+# Extrae la línea "-- Server version" de la cabecera del dump (.sql o .sql.gz)
+extract_server_version_from_backup() {
+    local backup_file="$1"
+    local header
+    local server_version_line
+
+    if [[ "$backup_file" == *.gz ]]; then
+        header=$(gunzip -c "$backup_file" 2>/dev/null | head -n 40)
+    else
+        header=$(head -n 40 "$backup_file" 2>/dev/null)
+    fi
+
+    server_version_line=$(printf '%s\n' "$header" | grep -m1 -E '^-- Server version' || true)
+    if [ -z "$server_version_line" ]; then
+        return 1
+    fi
+
+    # Quitar el prefijo "-- Server version" y espacios/tabs
+    printf '%s\n' "$server_version_line" | sed -E 's/^-- Server version[[:space:]]+//'
+}
+
+# Mapea la cadena de versión del servidor a una imagen Docker (major.minor)
+map_server_version_to_docker_image() {
+    local version_string="$1"
+    local major_minor
+
+    major_minor=$(printf '%s\n' "$version_string" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    if [ -z "$major_minor" ]; then
+        return 1
+    fi
+
+    if printf '%s\n' "$version_string" | grep -qi 'MariaDB'; then
+        echo "mariadb:${major_minor}"
+        return 0
+    fi
+
+    if printf '%s\n' "$version_string" | grep -qi 'Percona'; then
+        echo "percona/percona-server:${major_minor}"
+        return 0
+    fi
+
+    # MySQL u otros forks compatibles sin marca explícita
+    echo "mysql:${major_minor}"
+    return 0
+}
+
+# Resuelve la imagen Docker: .env > detección desde backup > fallback
+DEFAULT_DOCKER_IMAGE="mysql:8.0"
+DOCKER_IMAGE_SOURCE="default"
+DETECTED_SERVER_VERSION=""
+
+if [ -n "$DOCKER_IMAGE" ]; then
+    DOCKER_IMAGE_SOURCE="env"
+else
+    DETECTED_SERVER_VERSION=$(extract_server_version_from_backup "$SELECTED_BACKUP" || true)
+    if [ -n "$DETECTED_SERVER_VERSION" ]; then
+        DETECTED_IMAGE=$(map_server_version_to_docker_image "$DETECTED_SERVER_VERSION" || true)
+        if [ -n "$DETECTED_IMAGE" ]; then
+            DOCKER_IMAGE="$DETECTED_IMAGE"
+            DOCKER_IMAGE_SOURCE="detected"
+        else
+            DOCKER_IMAGE="$DEFAULT_DOCKER_IMAGE"
+        fi
+    else
+        DOCKER_IMAGE="$DEFAULT_DOCKER_IMAGE"
+    fi
+fi
+
 # Configuración del contenedor Docker desde .env o valores por defecto
-DOCKER_IMAGE="${DOCKER_IMAGE:-mysql:8.0}"
-DOCKER_CONTAINER_PORT="${DOCKER_CONTAINER_PORT:-3306}"
+DOCKER_LISTEN_PORT="${DOCKER_LISTEN_PORT:-${DOCKER_CONTAINER_PORT:-3306}}"
 DOCKER_HOST_PORT="${DOCKER_HOST_PORT:-}"
 DOCKER_ROOT_PASSWORD="${DOCKER_ROOT_PASSWORD:-password}"
 DOCKER_RESTORE_USER="${DOCKER_RESTORE_USER:-${DB_USER:-root}}"
@@ -261,9 +328,21 @@ RESTORE_DB="${DB_NAME}"
 
 echo ""
 echo -e "${BLUE}🐳 Configuración del contenedor Docker:${NC}"
-echo -e "   Imagen: ${YELLOW}$DOCKER_IMAGE${NC}"
+case "$DOCKER_IMAGE_SOURCE" in
+    env)
+        echo -e "   Imagen: ${YELLOW}$DOCKER_IMAGE${NC} (definida en .env)"
+        ;;
+    detected)
+        echo -e "   Imagen: ${YELLOW}$DOCKER_IMAGE${NC} (detectada desde el backup)"
+        echo -e "   Versión origen: ${YELLOW}$DETECTED_SERVER_VERSION${NC}"
+        ;;
+    *)
+        echo -e "   Imagen: ${YELLOW}$DOCKER_IMAGE${NC} (fallback por defecto)"
+        echo -e "   ${YELLOW}⚠️  No se pudo detectar el SGBD del backup; se usa $DEFAULT_DOCKER_IMAGE${NC}"
+        ;;
+esac
 echo -e "   Nombre del contenedor: ${YELLOW}$CONTAINER_NAME${NC}"
-echo -e "   Puerto: ${YELLOW}$RESTORE_PORT:$DOCKER_CONTAINER_PORT${NC}"
+echo -e "   Puerto: ${YELLOW}$RESTORE_PORT:$DOCKER_LISTEN_PORT${NC} (host:contenedor)"
 echo -e "   Usuario para restaurar: ${YELLOW}$DOCKER_RESTORE_USER${NC}"
 echo -e "   Base de datos: ${YELLOW}$RESTORE_DB${NC}"
 echo ""
@@ -273,7 +352,7 @@ echo "🔨 Creando contenedor Docker..."
 CONTAINER_CREATE_OUTPUT=$(docker run -d \
     --name "$CONTAINER_NAME" \
     -e MYSQL_ROOT_PASSWORD="$DOCKER_ROOT_PASSWORD" \
-    -p "$RESTORE_PORT:$DOCKER_CONTAINER_PORT" \
+    -p "$RESTORE_PORT:$DOCKER_LISTEN_PORT" \
     "$DOCKER_IMAGE" \
     2>&1)
 
@@ -447,7 +526,8 @@ echo "   Contenedor: $CONTAINER_NAME"
 echo "   Imagen: $DOCKER_IMAGE"
 echo "   Base de datos: $RESTORE_DB"
 echo "   Tablas restauradas: $TABLE_COUNT"
-echo "   Puerto: $RESTORE_PORT"
+echo "   Puerto host (expuesto): $RESTORE_PORT"
+echo "   Puerto contenedor (escucha): $DOCKER_LISTEN_PORT"
 echo ""
 
 echo -e "${GREEN}✅ Restauración completada exitosamente${NC}"

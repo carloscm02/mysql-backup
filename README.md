@@ -30,6 +30,7 @@ Herramientas en Bash para realizar copias de seguridad y restaurar bases de dato
 - 🐳 Restauración en contenedores Docker aislados
 - 🔧 Configuración flexible mediante variables de entorno
 - 📦 Selección interactiva de backups
+- 🔍 Detección automática de imagen Docker desde la versión del SGBD de origen (cabecera del dump)
 - 🔌 Asignación automática de puertos disponibles
 - 👤 Creación automática de usuarios y bases de datos
 - 🛡️ No afecta la base de datos original
@@ -154,8 +155,9 @@ DB_NAME=nombre_base_datos
 
 ```env
 # Configuración del contenedor Docker
+# DOCKER_IMAGE es opcional: si se omite, se detecta desde la cabecera del backup
 DOCKER_IMAGE=mysql:8.0
-DOCKER_CONTAINER_PORT=3306
+DOCKER_LISTEN_PORT=3306
 DOCKER_HOST_PORT=10000
 DOCKER_ROOT_PASSWORD=tu_password_root_seguro
 DOCKER_RESTORE_USER=restore_user
@@ -181,9 +183,9 @@ DOCKER_CONTAINER_NAME=mysql-restore-container
 
 | Variable | Descripción | Valor por Defecto | Ejemplo |
 |----------|-------------|-------------------|---------|
-| `DOCKER_IMAGE` | Imagen Docker a utilizar | `mysql:8.0` | `mariadb:10.6` |
-| `DOCKER_CONTAINER_PORT` | Puerto interno del contenedor | `3306` | `3306` |
-| `DOCKER_HOST_PORT` | Puerto del host (si está vacío, se asigna automáticamente) | `3307` (auto) | `3307` |
+| `DOCKER_IMAGE` | Imagen Docker a utilizar. Si está vacío, se detecta desde `-- Server version` del dump (`mariadb:X.Y` / `mysql:X.Y`); si no es posible, `mysql:8.0` | Auto / `mysql:8.0` | `mariadb:10.6` |
+| `DOCKER_LISTEN_PORT` | Puerto donde MySQL/MariaDB escucha dentro del contenedor | `3306` | `3306` |
+| `DOCKER_HOST_PORT` | Puerto del host por el que se expone el contenedor (si está vacío, se asigna automáticamente) | `3307` (auto) | `3307` |
 | `DOCKER_ROOT_PASSWORD` | Contraseña del usuario root en el contenedor | `password` | `[tu_password_root_seguro]` |
 | `DOCKER_RESTORE_USER` | Usuario para restaurar el backup | `DB_USER` o `root` | `restore_user` |
 | `DOCKER_RESTORE_PASS` | Contraseña del usuario de restauración | `DB_PASS` o `password` | `restore_password` |
@@ -201,7 +203,7 @@ DB_NAME=nombre_base_datos
 
 # Configuración opcional para Docker
 DOCKER_IMAGE=mariadb:10.6
-DOCKER_CONTAINER_PORT=3306
+DOCKER_LISTEN_PORT=3306
 DOCKER_HOST_PORT=10000
 DOCKER_ROOT_PASSWORD=tu_password_root_seguro
 DOCKER_RESTORE_USER=restore_user
@@ -276,9 +278,10 @@ Ejecuta el script desde el directorio `mysql-backup/` pasando el archivo `.env` 
 El script:
 1. Muestra los backups disponibles
 2. Permite seleccionar uno
-3. Crea un nuevo contenedor Docker
-4. Restaura el backup en el contenedor
-5. Muestra información de conexión
+3. Resuelve la imagen Docker (`DOCKER_IMAGE` del `.env`, o detección automática desde `-- Server version` del dump, o `mysql:8.0`)
+4. Crea un nuevo contenedor Docker
+5. Restaura el backup en el contenedor
+6. Muestra información de conexión
 
 **Ventajas:**
 - ✅ No afecta la base de datos original
